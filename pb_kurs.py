@@ -82,8 +82,9 @@ def id(update, context):
 
 def read_rate():
     read_f = yaml.load(open(history_file), Loader=yaml.FullLoader)
-    cur_rate = next( iter(read_f[-1].values()) )['USD']
-    return {'buy': cur_rate['buy'], 'sale': cur_rate['sale']}
+    if ( (read_f is not None) and (len(read_f) > 0) ):
+        cur_rate = next( iter(read_f[-1].values()) )['USD']
+        return {'buy': cur_rate['buy'], 'sale': cur_rate['sale']}
 
 def send_upd(rate):
     for uid in listen_uid_list:
@@ -95,10 +96,11 @@ def send_upd(rate):
 
 def send_current(context):
     cur_rate = read_rate()
-    context.bot.send_message(context.job.context,
-        text=f"*USD*:\n  {cur_rate['buy']} - {cur_rate['sale']}",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    if cur_rate is not None:
+        context.bot.send_message(context.job.context,
+            text=f"*USD*:\n  {cur_rate['buy']} - {cur_rate['sale']}",
+            parse_mode=ParseMode.MARKDOWN
+        )
     del cur_rate
 
 
