@@ -7,33 +7,64 @@ import logging
 import psutil
 import time
 
-import urllib.request, json
+# pip install urllib3
+import urllib3, json
 import yaml
 
-from threading import Timer
+# pip install timeloop
+from timeloop import Timeloop
+from datetime import timedelta
+# from threading import Timer
+
 from telegram import ReplyKeyboardMarkup, ChatAction, ParseMode
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
-
-if os.path.isfile('./_tel_creds'):
-    updater = Updater(open('./_tel_creds', "r").read(), use_context=True)
+if os.path.isfile('_tel_creds'):
+    global updater
+    token = open('_tel_creds', "r").read().strip()
+    updater = Updater(token, use_context=True)
 else:
-    print(f"Missing credentials.. place it in '_tel_creds' file.")
-
+    print("Missing credentials.. place it in '_tel_creds' file.")
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
+    level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-start_uid_list = set([])
+# List of UID to send spam :)
+listen_uid_list = set([])
+history_file = './history.yaml'
 
+repeater = Timeloop()
 
+@repeater.job(interval=timedelta(seconds=30))
+def get_rate():
+    url = "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=11"
+    currentDT = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
+    resp = urllib3.PoolManager().request('GET', url, retries=3, timeout=2.0).data.decode('utf-8')
+    obj = json.loads(resp)
 
-class RepeatTimer(Timer):
-    def run(self):
-        while not self.finished.wait(self.interval):
-            self.function(*self.args, **self.kwargs)
+    usd = next((x for x in obj if x['ccy']=='USD'))
+    buy_p = round( float(usd['buy']), 2 )
+    sale_p = round( float(usd['sale']), 2 )
+
+    list = []
+
+    changed = True
+    if (os.path.exists(history_file)):
+        list = yaml.load(open(history_file), Loader=yaml.FullLoader)
+        if ( (list is not None) and (len(list) > 0) ):
+            cur_rate = next( iter(list[-1].values()) )['USD']
+            if ([cur_rate['buy'], cur_rate['sale']] != [buy_p, sale_p]):
+                list.append({currentDT: {'USD': {'buy': buy_p,'sale': sale_p}}})
+                send_upd({'USD': {'buy': buy_p,'sale': sale_p}})
+            else:
+                changed = False
+        else:
+            list.append({currentDT: {'USD': {'buy': buy_p,'sale': sale_p}}})
+    if changed:
+        yaml.dump(list, open(history_file, 'w'), allow_unicode=True)
+    del list
 
 def error(update, context):
     logger.warning('Update "%s" caused error "%s"', update, context.error)
@@ -43,38 +74,51 @@ def help(update, context):
     update.message.reply_text('Hi!', reply_markup=help_map)
 
 def id(update, context):
-    start_uid_list.add(update.effective_user.id)
     update.message.reply_text(f'FirstName:{update.effective_user.first_name}\nID: {update.effective_user.id}')
     print('[INFO] UserID: %s' % update.effective_user.id)
     # update.message.reply_text('Let\'s play %s :)' % update.effective_user.full_name)
     # timer.start()
-    # context.chat_data['upd'] = context.job_queue.run_repeating(upd_status, 60, context=cid)
+    # context.chat_data['sub_upd'] = context.job_queue.run_repeating(send_upd, 60, context=cid)
+
+def read_rate():
+    read_f = yaml.load(open(history_file), Loader=yaml.FullLoader)
+    cur_rate = next( iter(read_f[-1].values()) )['USD']
+    return {'buy': cur_rate['buy'], 'sale': cur_rate['sale']}
+
+def send_upd(rate):
+    for uid in listen_uid_list:
+        ccy = rate['USD']
+        updater.bot.send_message(uid,
+            text=f"*USD*:\n  {ccy['buy']} - {ccy['sale']}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+def send_current(context):
+    cur_rate = read_rate()
+    context.bot.send_message(context.job.context,
+        text=f"*USD*:\n  {cur_rate['buy']} - {cur_rate['sale']}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    del cur_rate
+
 
 def start(update, context):
+    listen_uid_list.add(update.effective_user.id)
     chat_id = update.message.chat_id
     strstop = ReplyKeyboardMarkup([['/start', '/stop']], one_time_keyboard=True)
 
     update.message.reply_text('Буду держать тебя в курсе ! Чтоб остановить /stop', reply_markup=strstop)
-    context.chat_data['upd'] = context.job_queue.run_repeating(upd_status, 30, context=chat_id)
-    context.job_queue.run_once(upd_status, 1, context=chat_id)
-
-    read_curs = yaml.load(open('./curs.yaml'), Loader=yaml.FullLoader)
-    cur_rate = next(iter(read_curs[-1].values()))['USD']
-    context.bot.send_message(
-        chat_id,
-        text="*Current*\n{}:\n  {} - {}".format('USD', cur_rate['buy'], cur_rate['sell']),
-        parse_mode=ParseMode.MARKDOWN
-    )
-    del read_curs
+    context.job_queue.run_once(send_current, 1, context=chat_id)
+    # context.chat_data['sub_upd'] = context.job_queue.run_repeating(send_upd, 10, context=chat_id)
     #context.bot.send_message(chat_id, text=chat_id)
 
 def stop(update, context):
-    # timer.cancel()
-    if 'upd' not in context.chat_data:
+    listen_uid_list.remove(update.effective_user.id)
+    if 'sub_upd' not in context.chat_data:
         update.message.reply_text('You have no active timer')
         return
-    context.chat_data['upd'].schedule_removal()
-    del context.chat_data['upd']
+    context.chat_data['sub_upd'].schedule_removal()
+    del context.chat_data['sub_upd']
     update.message.reply_text('Timer successfully unset!')
 
 def ping(update, context):
@@ -85,52 +129,8 @@ def ping(update, context):
         )
     )
 
-def curs_upd():
-    print('Still alive..')
-
-    url = "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=11"
-    obj = json.loads(urllib.request.urlopen(url).read().decode())
-    currentDT = datetime.datetime.now()
-
-    usd = next((x for x in obj if x['ccy']=='USD'))
-
-    curs_list = []
-    if path.exists('./curs.yaml'):
-        curs_list = yaml.load(open('./curs.yaml'), Loader=yaml.FullLoader)
-
-    curs_list.append({
-        currentDT.strftime("%Y-%m-%d %H:%M"): {
-            'USD': {
-                'buy': round(float(usd['buy']),2),
-                'sell': round(float(usd['sale']),2),
-            },
-        }
-    })
-
-    data = yaml.dump(curs_list, open('./curs.yaml', 'w'), allow_unicode=True)
-    del curs_list
-
-
-def upd_status(context):
-    prev_rate = []
-    cur_rate  = []
-    ### WRITE ONLY DIFF NO INSERT EVERYTIME
-
-    read_curs = yaml.load(open('./curs.yaml'), Loader=yaml.FullLoader)
-    if len(read_curs) > 2:
-        prev_rate = next( iter(read_curs[-2].values()) )['USD']
-    cur_rate = next( iter(read_curs[-1].values()) )['USD']
-    if cur_rate != prev_rate:
-        context.bot.send_message(
-            context.job.context,
-            text="*NEW*\n{}:\n  {} - {}".format('USD', cur_rate['buy'], cur_rate['sell']),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    del read_curs
-
 def main():
-    curs_upd()
-    timer.start()
+    get_rate()
     print('Started...')
 
     dp = updater.dispatcher
@@ -155,5 +155,13 @@ def main():
     updater.idle()
 
 if __name__ == '__main__':
-    timer = RepeatTimer(60, curs_upd)
+    repeater.start(block=False)
+    # timer = RepeatTimer(10, get_rate)
     main()
+    while True:
+        try:
+            time.sleep(1000)
+        except KeyboardInterrupt:
+            repeater.stop()
+            updater.stop()
+            break
