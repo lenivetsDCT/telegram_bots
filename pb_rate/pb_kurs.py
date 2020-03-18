@@ -32,11 +32,12 @@ logger = logging.getLogger(__name__)
 
 repeater = Timeloop()
 
+listen_uid_list = set([])
 history_file = './history.yaml'
 uid_list_file = './uid_list.json'
 
 @repeater.job(interval=timedelta(seconds=30))
-def get_rate():
+def write_rate():
     url = "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=11"
     currentDT = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -65,43 +66,22 @@ def get_rate():
         yaml.dump(list, open(history_file, 'w'), allow_unicode=True)
     del list
 
-def write_uid_list(uid_list):
-    with open(uid_list_file, 'w+') as filehandle:
-        json.dump(list(listen_uid_list), filehandle)
-
-def read_uid_list():
-    if os.path.exists(uid_list_file):
-        with open(uid_list_file, 'r') as filehandle:
-            return set(json.load(filehandle))
-
-def error(update, context):
-    logger.warning('Update "%s" caused error "%s"', update, context.error)
-
-def help(update, context):
-    help_map = ReplyKeyboardMarkup([['/id', '/start', '/stop', 'ping']], one_time_keyboard=True)
-    update.message.reply_text('Hi!', reply_markup=help_map)
-
-def id(update, context):
-    update.message.reply_text(f'FirstName:{update.effective_user.first_name}\nID: {update.effective_user.id}')
-    print('[INFO] UserID: %s' % update.effective_user.id)
-    # update.message.reply_text('Let\'s play %s :)' % update.effective_user.full_name)
-    # timer.start()
-    # context.chat_data['sub_upd'] = context.job_queue.run_repeating(send_upd, 60, context=cid)
-
 def read_rate():
     read_f = yaml.load(open(history_file), Loader=yaml.FullLoader)
     if ( (read_f is not None) and (len(read_f) > 0) ):
         cur_rate = next( iter(read_f[-1].values()) )['USD']
         return {'buy': cur_rate['buy'], 'sale': cur_rate['sale']}
 
-def send_upd(rate):
-    listen_uid_list = read_uid_list()
-    for uid in listen_uid_list:
-        ccy = rate['USD']
-        updater.bot.send_message(uid,
-            text=f"*USD*:\n  {ccy['buy']} - {ccy['sale']}",
-            parse_mode=ParseMode.MARKDOWN
-        )
+
+def write_uid_list(uid_list):
+    with open(uid_list_file, 'w+') as filehandle:
+        json.dump(list(uid_list), filehandle)
+
+def read_uid_list():
+    if not os.path.exists(uid_list_file):
+        write_uid_list([])
+    with open(uid_list_file, 'r') as filehandle:
+        return set(json.load(filehandle))
 
 def send_current(context):
     cur_rate = read_rate()
@@ -113,21 +93,38 @@ def send_current(context):
         )
     del cur_rate
 
+def send_upd(rate):
+    listen_uid_list = read_uid_list()
+    for uid in listen_uid_list:
+        ccy = rate['USD']
+        updater.bot.send_message(uid,
+            text=f"*USD*:\n  {ccy['buy']} - {ccy['sale']}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+def error(update, context):
+    logger.warning('Update "%s" caused error "%s"', update, context.error)
+
+def help(update, context):
+    help_map = ReplyKeyboardMarkup([['/id', '/start', '/stop', 'ping']], one_time_keyboard=True)
+    update.message.reply_text('Hi!', reply_markup=help_map)
+
+def id(update, context):
+    update.message.reply_text(f'FirstName:{update.effective_user.first_name}\nID: {update.effective_user.id}')
+    print('[INFO] UserID: %s' % update.effective_user.id)
+
 def start(update, context):
     listen_uid_list = read_uid_list()
-    listen_uid_list.add(update.message.chat_id)# update.effective_user.id)
+    listen_uid_list.add(update.effective_user.id)
     write_uid_list(listen_uid_list)
 
     strstop = ReplyKeyboardMarkup([['/start', '/stop']], one_time_keyboard=True)
-
     update.message.reply_text('Буду держать тебя в курсе ! Чтоб остановить /stop', reply_markup=strstop)
     context.job_queue.run_once(send_current, 1, context=update.message.chat_id)
-    # context.chat_data['sub_upd'] = context.job_queue.run_repeating(send_upd, 10, context=chat_id)
-    #context.bot.send_message(chat_id, text=chat_id)
 
 def stop(update, context):
     listen_uid_list = read_uid_list()
-    listen_uid_list.remove(update.message.chat_id)# update.effective_user.id)
+    listen_uid_list.remove(update.effective_user.id)
     write_uid_list(listen_uid_list)
 
     if 'sub_upd' not in context.chat_data:
@@ -149,12 +146,19 @@ def rate(update, context):
     context.job_queue.run_once(send_current, 1, context=update.message.chat_id)
 
 def main():
-    get_rate()
+    write_rate()
     print('Started...')
 
     dp = updater.dispatcher
 
     dp.add_error_handler(error)
+    dp.add_handler(CommandHandler("help", help))
+    dp.add_handler(CommandHandler("id", id))
+    dp.add_handler(CommandHandler("start", start, pass_job_queue=True, pass_chat_data=True))
+    dp.add_handler(CommandHandler("stop", stop))
+    dp.add_handler(CommandHandler("rate", rate))
+    dp.add_handler(MessageHandler(Filters.regex('ping'), ping))
+
     dp.bot.send_animation(
         chat_id=371439949,
         caption='Bot started..',
@@ -162,23 +166,12 @@ def main():
         animation='https://i.pinimg.com/originals/eb/24/ac/eb24ac9ceb8b614128ed5945a385206a.gif'
     )
 
-    dp.add_handler(CommandHandler("help", help))
-    dp.add_handler(CommandHandler("id", id))
-    dp.add_handler(CommandHandler("start", start, pass_job_queue=True, pass_chat_data=True))
-    dp.add_handler(CommandHandler("stop", stop))
-    dp.add_handler(CommandHandler("rate", rate))
-
-    dp.add_handler(MessageHandler(Filters.regex('ping'), ping))
-    # dp.add_handler(MessageHandler(Filters.regex(re.compile(r'ping', re.IGNORECASE)), ping))
-
     updater.start_polling()
     updater.idle()
 
 if __name__ == '__main__':
     repeater.start(block=False)
-    # timer = RepeatTimer(10, get_rate)
     main()
-    print(f"Hello {listen_uid_list}")
     while True:
         try:
             time.sleep(1000)
