@@ -1,6 +1,6 @@
 # https://github.com/eternnoir/pyTelegramBotAPI
 # https://github.com/python-telegram-bot/python-telegram-bot
-# pip install pyyaml
+# pip install psutil pyyaml timeloop pyTelegramBotAPI python-telegram-bot
 import os.path
 import datetime
 import logging
@@ -36,35 +36,40 @@ listen_uid_list = set([])
 history_file = './history.yaml'
 uid_list_file = './uid_list.json'
 
-@repeater.job(interval=timedelta(seconds=30))
+@repeater.job(interval=timedelta(seconds=60))
 def write_rate():
     url = "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=11"
     currentDT = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    obj = None
 
-    resp = urllib3.PoolManager().request('GET', url, retries=3, timeout=2.0).data.decode('utf-8')
-    obj = json.loads(resp)
+    try:
+        resp = urllib3.PoolManager().request('GET', url, retries=30, timeout=10.0).data.decode('utf-8')
+        obj = json.loads(resp)
+    except:
+        print(f"[ERR] Get rate from {url} failed.")
 
-    usd = next((x for x in obj if x['ccy']=='USD'))
-    buy_p = round( float(usd['buy']), 2 )
-    sale_p = round( float(usd['sale']), 2 )
+    if (obj is not None):
+      usd = next((x for x in obj if x['ccy']=='USD'))
+      buy_p = round( float(usd['buy']), 2 )
+      sale_p = round( float(usd['sale']), 2 )
 
-    list = []
+      list = []
 
-    changed = True
-    if (os.path.exists(history_file)):
-        list = yaml.load(open(history_file), Loader=yaml.FullLoader)
-        if ( (list is not None) and (len(list) > 0) ):
-            cur_rate = next( iter(list[-1].values()) )['USD']
-            if ([cur_rate['buy'], cur_rate['sale']] != [buy_p, sale_p]):
-                list.append({currentDT: {'USD': {'buy': buy_p,'sale': sale_p}}})
-                send_upd({'USD': {'buy': buy_p,'sale': sale_p}})
-            else:
-                changed = False
-        else:
-            list.append({currentDT: {'USD': {'buy': buy_p,'sale': sale_p}}})
-    if changed:
-        yaml.dump(list, open(history_file, 'w'), allow_unicode=True)
-    del list
+      changed = True
+      if (os.path.exists(history_file)):
+          list = yaml.load(open(history_file), Loader=yaml.FullLoader)
+          if ( (list is not None) and (len(list) > 0) ):
+              cur_rate = next( iter(list[-1].values()) )['USD']
+              if ([cur_rate['buy'], cur_rate['sale']] != [buy_p, sale_p]):
+                  list.append({currentDT: {'USD': {'buy': buy_p,'sale': sale_p}}})
+                  send_upd({'USD': {'buy': buy_p,'sale': sale_p}})
+              else:
+                  changed = False
+          else:
+              list.append({currentDT: {'USD': {'buy': buy_p,'sale': sale_p}}})
+      if changed:
+          yaml.dump(list, open(history_file, 'w'), allow_unicode=True)
+      del list
 
 def read_rate():
     read_f = yaml.load(open(history_file), Loader=yaml.FullLoader)
@@ -124,8 +129,9 @@ def start(update, context):
 
 def stop(update, context):
     listen_uid_list = read_uid_list()
-    listen_uid_list.remove(update.effective_user.id)
-    write_uid_list(listen_uid_list)
+    if update.effective_user.id in listen_uid_list:
+        listen_uid_list.remove(update.effective_user.id)
+        write_uid_list(listen_uid_list)
 
     if 'sub_upd' not in context.chat_data:
         update.message.reply_text('You have no active timer')
